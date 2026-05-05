@@ -23,18 +23,19 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
-from spd.configs import PGDReconLossConfig
-from spd.metrics.pgd_utils import pgd_masked_recon_loss_update
-from spd.models.component_model import ComponentModel
-from spd.routing import AllLayersRouter
-from spd.utils.distributed_utils import (
+from param_decomp.configs import LayerwiseCiConfig, PGDReconLossConfig
+from param_decomp.metrics.pgd_utils import pgd_masked_recon_loss_update
+from param_decomp.models.batch_and_loss_fns import recon_loss_mse, run_batch_passthrough
+from param_decomp.models.component_model import ComponentModel
+from param_decomp.routing import AllLayersRouter
+from param_decomp.utils.distributed_utils import (
     cleanup_distributed,
     gather_all_tensors,
     get_distributed_state,
     init_distributed,
     sync_across_processes,
 )
-from spd.utils.module_utils import ModulePathInfo
+from param_decomp.utils.module_utils import ModulePathInfo
 
 
 class _OneLayerLinearModel(nn.Module):
@@ -55,10 +56,9 @@ def _make_component_model(fc_weight: Tensor) -> ComponentModel:
     target.requires_grad_(False)
     return ComponentModel(
         target_model=target,
+        run_batch=run_batch_passthrough,
         module_path_info=[ModulePathInfo(module_path="fc", C=1)],
-        ci_fn_hidden_dims=[2],
-        ci_fn_type="mlp",
-        pretrained_model_output_attr=None,
+        ci_config=LayerwiseCiConfig(fn_type="mlp", hidden_dims=[2]),
         sigmoid_type="leaky_hard",
     )
 
@@ -95,7 +95,7 @@ def _test_shared_across_batch_sources_synced():
             ci=ci,
             weight_deltas=None,
             target_out=target_out,
-            output_loss_type="mse",
+            reconstruction_loss=recon_loss_mse,
             router=router,
             pgd_config=pgd_config,
         )
@@ -141,7 +141,7 @@ def _test_unique_per_datapoint_sources_independent():
             ci=ci,
             weight_deltas=None,
             target_out=target_out,
-            output_loss_type="mse",
+            reconstruction_loss=recon_loss_mse,
             router=router,
             pgd_config=pgd_config,
         )

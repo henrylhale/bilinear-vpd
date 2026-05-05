@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 import torch
 
-from spd.utils.distributed_utils import (
+from param_decomp.utils.distributed_utils import (
     cleanup_distributed,
     gather_all_tensors,
     get_distributed_state,
@@ -226,7 +226,7 @@ class TestGatherAllTensors:
         script_path = Path(__file__).resolve()
 
         # ports should be globally unique in tests to allow test parallelization
-        # see discussion at: https://github.com/goodfire-ai/spd/pull/186
+        # see discussion at: https://github.com/goodfire-ai/param-decomp/pull/186
         cmd = [
             "torchrun",
             "--standalone",

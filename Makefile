@@ -6,8 +6,10 @@ install: copy-templates
 .PHONY: install-dev
 install-dev: copy-templates
 	uv sync
-	pre-commit install
+	uv run pre-commit install
 
+.PHONY: install-all
+install-all: install-dev install-app
 
 # special install for CI (GitHub Actions) that reduces disk usage and install time
 # 1. create a fresh venv with `--clear` -- this is mostly only for local testing of the CI install
@@ -18,7 +20,7 @@ install-dev: copy-templates
 #    - we want to kill the cache after installing before we run the tests
 #  > `--extra-index-url` to get cpu-only pytorch wheels. installing with just `uv sync` will download a bunch of cuda stuff we cannot use anyway, since there are no GPUs anyways. takes up a lot of space and makes the install take 5x as long
 #  > `--index-strategy unsafe-best-match` because pytorch index won't have every version of each package we need. markupsafe is a particular pain point
-# Note: explored the `--compile-bytecode` option for test speedups, nothing came of it. see https://github.com/goodfire-ai/spd/pull/187/commits/740f6a28f4d3378078c917125356b6466f155e71
+# Note: explored the `--compile-bytecode` option for test speedups, nothing came of it. see https://github.com/goodfire-ai/param-decomp/pull/187/commits/740f6a28f4d3378078c917125356b6466f155e71
 .PHONY: install-ci
 install-ci:
 	uv venv --python 3.13 --clear
@@ -30,9 +32,9 @@ install-ci:
 
 .PHONY: copy-templates
 copy-templates:
-	@if [ ! -f spd/scripts/sweep_params.yaml ]; then \
-		cp spd/scripts/sweep_params.yaml.example spd/scripts/sweep_params.yaml; \
-		echo "Created spd/scripts/sweep_params.yaml from template"; \
+	@if [ ! -f param_decomp/scripts/sweep_params.yaml ]; then \
+		cp param_decomp/scripts/sweep_params.yaml.example param_decomp/scripts/sweep_params.yaml; \
+		echo "Created param_decomp/scripts/sweep_params.yaml from template"; \
 	fi
 
 
@@ -71,7 +73,7 @@ COVERAGE_DIR=docs/coverage
 
 .PHONY: coverage
 coverage:
-	uv run pytest tests/ --cov=spd --runslow
+	uv run pytest tests/ --cov=param_decomp --runslow
 	mkdir -p $(COVERAGE_DIR)
 	uv run python -m coverage report -m > $(COVERAGE_DIR)/coverage.txt
 	uv run python -m coverage html --directory=$(COVERAGE_DIR)/html/
@@ -87,12 +89,12 @@ clean:
 
 .PHONY: app
 app:
-	@uv run python spd/app/run_app.py
+	@uv run python param_decomp/app/run_app.py
 
 .PHONY: install-app
 install-app:
-	(cd spd/app/frontend && npm install)
+	(cd param_decomp/app/frontend && npm install)
 
 .PHONY: check-app
 check-app:
-	(cd spd/app/frontend && npm run format && npm run check && npm run lint)
+	(cd param_decomp/app/frontend && npm run format && npm run check && npm run lint)

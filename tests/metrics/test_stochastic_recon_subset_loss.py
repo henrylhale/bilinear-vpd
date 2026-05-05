@@ -3,10 +3,11 @@ from unittest.mock import patch
 import torch
 from torch import Tensor
 
-from spd.configs import SamplingType, UniformKSubsetRoutingConfig
-from spd.metrics import stochastic_recon_subset_loss
-from spd.models.components import ComponentsMaskInfo, make_mask_infos
-from spd.routing import Router
+from param_decomp.configs import SamplingType, UniformKSubsetRoutingConfig
+from param_decomp.metrics import stochastic_recon_subset_loss
+from param_decomp.models.batch_and_loss_fns import recon_loss_mse
+from param_decomp.models.components import ComponentsMaskInfo, make_mask_infos
+from param_decomp.routing import Router
 from tests.metrics.fixtures import make_one_layer_component_model
 
 
@@ -61,7 +62,7 @@ class TestStochasticReconSubsetLoss:
             )
 
         with patch(
-            "spd.metrics.stochastic_recon_subset_loss.calc_stochastic_component_mask_info",
+            "param_decomp.metrics.stochastic_recon_subset_loss.calc_stochastic_component_mask_info",
             side_effect=mock_calc_stochastic_component_mask_info,
         ):
             # Calculate expected loss manually
@@ -92,12 +93,12 @@ class TestStochasticReconSubsetLoss:
                 model=model,
                 sampling="continuous",
                 n_mask_samples=2,
-                output_loss_type="mse",
                 batch=batch,
                 target_out=target_out,
                 ci=ci,
                 weight_deltas=None,
                 routing=UniformKSubsetRoutingConfig(),
+                reconstruction_loss=recon_loss_mse,
             )
 
             assert torch.allclose(actual_loss, torch.tensor(expected_loss), rtol=1e-5), (

@@ -2,29 +2,31 @@ from pathlib import Path
 
 import pytest
 
-from spd.configs import (
+from param_decomp.configs import (
     CI_L0Config,
     Config,
     FaithfulnessLossConfig,
     IHTaskConfig,
     ImportanceMinimalityLossConfig,
+    LayerwiseCiConfig,
     ModulePatternInfoConfig,
     ScheduleConfig,
     StochasticHiddenActsReconLossConfig,
     StochasticReconLayerwiseLossConfig,
     StochasticReconLossConfig,
 )
-from spd.experiments.ih.configs import InductionModelConfig
-from spd.experiments.ih.model import InductionTransformer
-from spd.identity_insertion import insert_identity_operations_
-from spd.run_spd import optimize
-from spd.utils.data_utils import DatasetGeneratedDataLoader, InductionDataset
-from spd.utils.general_utils import set_seed
+from param_decomp.experiments.ih.configs import InductionModelConfig
+from param_decomp.experiments.ih.model import InductionTransformer
+from param_decomp.identity_insertion import insert_identity_operations_
+from param_decomp.models.batch_and_loss_fns import recon_loss_kl, run_batch_first_element
+from param_decomp.run_param_decomp import optimize
+from param_decomp.utils.data_utils import DatasetGeneratedDataLoader, InductionDataset
+from param_decomp.utils.general_utils import set_seed
 
 
 @pytest.mark.slow
 def test_ih_transformer_decomposition_happy_path(tmp_path: Path) -> None:
-    """Test that SPD decomposition works on a 2-layer, 1 head attention-only Transformer model"""
+    """Test that PD works on a 2-layer, 1 head attention-only Transformer model"""
     set_seed(0)
     device = "cpu"
 
@@ -50,8 +52,7 @@ def test_ih_transformer_decomposition_happy_path(tmp_path: Path) -> None:
         # General
         seed=0,
         n_mask_samples=1,
-        ci_fn_type="vector_mlp",
-        ci_fn_hidden_dims=[128],
+        ci_config=LayerwiseCiConfig(fn_type="vector_mlp", hidden_dims=[128]),
         module_info=[
             ModulePatternInfoConfig(module_pattern="blocks.*.attn.q_proj", C=10),
             ModulePatternInfoConfig(module_pattern="blocks.*.attn.k_proj", C=10),
@@ -71,7 +72,6 @@ def test_ih_transformer_decomposition_happy_path(tmp_path: Path) -> None:
             StochasticReconLossConfig(coeff=1.0),
             FaithfulnessLossConfig(coeff=200),
         ],
-        output_loss_type="kl",
         # Training
         lr_schedule=ScheduleConfig(
             start_val=1e-3, fn_type="cosine", warmup_pct=0.01, final_val_frac=0.0
@@ -92,10 +92,9 @@ def test_ih_transformer_decomposition_happy_path(tmp_path: Path) -> None:
             StochasticHiddenActsReconLossConfig(),
         ],
         # Pretrained model info
-        pretrained_model_class="spd.experiments.ih.model.InductionTransformer",
+        pretrained_model_class="param_decomp.experiments.ih.model.InductionTransformer",
         pretrained_model_path=None,
         pretrained_model_name=None,
-        pretrained_model_output_attr=None,
         tokenizer_name=None,
         # Task Specific
         task_config=IHTaskConfig(
@@ -129,7 +128,8 @@ def test_ih_transformer_decomposition_happy_path(tmp_path: Path) -> None:
         device=device,
         train_loader=train_loader,
         eval_loader=eval_loader,
-        n_eval_steps=config.n_eval_steps,
+        run_batch=run_batch_first_element,
+        reconstruction_loss=recon_loss_kl,
         out_dir=tmp_path,
     )
 

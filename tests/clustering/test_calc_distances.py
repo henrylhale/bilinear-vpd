@@ -1,6 +1,6 @@
-from spd.clustering.consts import ComponentLabels
-from spd.clustering.merge_config import MergeConfig
-from spd.clustering.merge_history import MergeHistory, MergeHistoryEnsemble
+from param_decomp.clustering.consts import ComponentLabels
+from param_decomp.clustering.merge_config import MergeConfig
+from param_decomp.clustering.merge_history import MergeHistory, MergeHistoryEnsemble
 
 
 def test_merge_history_normalization_happy_path():
@@ -10,7 +10,6 @@ def test_merge_history_normalization_happy_path():
     config = MergeConfig(
         iters=3,
         alpha=1.0,
-        activation_threshold=None,
     )
 
     histories = []

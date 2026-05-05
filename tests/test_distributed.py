@@ -11,15 +11,18 @@ import pytest
 import torch
 import yaml
 
-from spd.settings import REPO_ROOT
+from param_decomp.settings import REPO_ROOT
 
 TEST_CONFIG = {
     # --- General ---
     "seed": 0,
     "C": 3,
     "n_mask_samples": 1,
-    "ci_fn_type": "vector_mlp",
-    "ci_fn_hidden_dims": [2],
+    "ci_config": {
+        "mode": "layerwise",
+        "fn_type": "vector_mlp",
+        "hidden_dims": [2],
+    },
     "sigmoid_type": "leaky_hard",
     "target_module_patterns": ["model.layers.0.mlp.gate_proj"],
     # --- Loss metrics ---
@@ -34,7 +37,6 @@ TEST_CONFIG = {
         {"classname": "CIMaskedReconLayerwiseLoss", "coeff": 1.0},
         {"classname": "CIMaskedReconLoss", "coeff": 1.0},
     ],
-    "output_loss_type": "kl",
     # --- Training ---
     "batch_size": 2,
     "steps": 20,
@@ -53,7 +55,7 @@ TEST_CONFIG = {
     # --- Pretrained model info ---
     "pretrained_model_class": "transformers.LlamaForCausalLM",
     "pretrained_model_name": "SimpleStories/SimpleStories-1.25M",
-    "pretrained_model_output_attr": "logits",
+    "output_extract": "logits",
     "tokenizer_name": "SimpleStories/SimpleStories-1.25M",
     # --- Task Specific ---
     "task_config": {
@@ -75,7 +77,7 @@ TEST_CONFIG = {
 
 def _parse_run_id_from_output(stderr: str) -> str:
     """Parse the run_id from the subprocess stderr output."""
-    match = re.search(r"Run ID: (s-[a-f0-9]+)", stderr)
+    match = re.search(r"Run ID: (p-[a-f0-9]+)", stderr)
     assert match, f"Could not find run_id in output:\n{stderr}"
     return match.group(1)
 
@@ -83,7 +85,7 @@ def _parse_run_id_from_output(stderr: str) -> str:
 @pytest.mark.slow
 class TestDistributedDeterminicity:
     def test_distributed_determinicity(self):
-        """Test DDP determinicity for SPD runs which don't use stochastic masks.
+        """Test DDP determinicity for PD runs which don't use stochastic masks.
 
         Runs DDP with 1 and 2 processes on CPU and shows that training metrics, eval metrics, and
         the updated model weights are consistent between the two runs.
@@ -107,11 +109,11 @@ class TestDistributedDeterminicity:
                 yaml.dump(TEST_CONFIG, f)
 
             # ports should be globally unique in tests to allow test parallelization
-            # see discussion at: https://github.com/goodfire-ai/spd/pull/186
+            # see discussion at: https://github.com/goodfire-ai/param-decomp/pull/186
             dp1_run_id = self._run_experiment(
-                config_path_dp1, n_processes=1, port=29501, spd_out_dir=tmpdir
+                config_path_dp1, n_processes=1, port=29501, param_decomp_out_dir=tmpdir
             )
-            dp1_out_dir = tmpdir / "spd" / dp1_run_id
+            dp1_out_dir = tmpdir / "decompositions" / dp1_run_id
 
             # Run with dp=2
             config_path_dp2 = tmpdir / "test_config_dp2.yaml"
@@ -119,11 +121,11 @@ class TestDistributedDeterminicity:
                 yaml.dump(TEST_CONFIG, f)
 
             # ports should be globally unique in tests to allow test parallelization
-            # see discussion at: https://github.com/goodfire-ai/spd/pull/186
+            # see discussion at: https://github.com/goodfire-ai/param-decomp/pull/186
             dp2_run_id = self._run_experiment(
-                config_path_dp2, n_processes=2, port=29502, spd_out_dir=tmpdir
+                config_path_dp2, n_processes=2, port=29502, param_decomp_out_dir=tmpdir
             )
-            dp2_out_dir = tmpdir / "spd" / dp2_run_id
+            dp2_out_dir = tmpdir / "decompositions" / dp2_run_id
 
             # Load and compare metrics from metrics.jsonl files
             dp1_metrics = self._load_metrics(dp1_out_dir / "metrics.jsonl")
@@ -140,10 +142,10 @@ class TestDistributedDeterminicity:
         config_path: Path,
         n_processes: int,
         port: int,
-        spd_out_dir: Path,
+        param_decomp_out_dir: Path,
     ) -> str:
         """Run the experiment using torchrun. Returns the run_id."""
-        script_path = REPO_ROOT / "spd" / "experiments" / "lm" / "lm_decomposition.py"
+        script_path = REPO_ROOT / "param_decomp" / "experiments" / "lm" / "lm_decomposition.py"
         assert script_path.exists(), f"{script_path} not found"
 
         cmd = [
@@ -156,10 +158,10 @@ class TestDistributedDeterminicity:
             str(config_path),
         ]
 
-        # disable cuda so we run on cpu, and set SPD_OUT_DIR to temp directory
+        # disable cuda so we run on cpu, and set PARAM_DECOMP_OUT_DIR to temp directory
         new_env = os.environ.copy()
         new_env["CUDA_VISIBLE_DEVICES"] = ""
-        new_env["SPD_OUT_DIR"] = str(spd_out_dir)
+        new_env["PARAM_DECOMP_OUT_DIR"] = str(param_decomp_out_dir)
 
         result = subprocess.run(cmd, env=new_env, capture_output=True, text=True, timeout=300)
 

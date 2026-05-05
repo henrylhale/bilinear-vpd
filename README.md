@@ -2,7 +2,7 @@
 
 This repo is for running parameter decomposition on neural networks.
 
-**VPD paper (April 2025)**
+**VPD paper (April 2026)**
 - Paper: https://www.goodfire.ai/research/interpreting-lm-parameters
 - Branch: main
 - Wandb for run in paper: https://wandb.ai/goodfire/spd/runs/s-55ea3f9b

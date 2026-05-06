@@ -27,7 +27,8 @@ The file is structured for paper readers — everything the method needs is here
   G. LR schedule
   H. Distributed setup + SPDModule container
   I. Training loop (faithfulness warmup + main loop)
-  J. Eval metrics (CI L0, CE/KL with various mask strategies, hidden-acts recon, PGD recon)
+  J. Eval metrics (CI L0 + bar chart, CE/KL, train-loss recompute, hidden-acts recon,
+     PGD recon, per-component mean-CI scatter figures)
 
 The `decompose` entry point takes a target model plus train and eval data iterators
 (yielding `[B, S]` int64 tensors of token ids); the entry-point files own the
@@ -52,22 +53,25 @@ are written for tokenized LM data.
 # nn.Module buffer attribute access is typed as `Tensor | Module` by basedpyright; suppress.
 # pyright: reportIndexIssue=false, reportArgumentType=false, reportOperatorIssue=false, reportUnnecessaryComparison=false
 
+import io
 import math
 import os
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any, Literal, cast, override
 
+import matplotlib.pyplot as plt
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb  # type: ignore[import-untyped]
+from PIL import Image
 from torch import Tensor
 from torch.nn.parallel import DistributedDataParallel
 
-# =============================================================================
-# Section A: Config
-# =============================================================================
+# --- Section A: Config ---
 
 
 @dataclass
@@ -146,9 +150,7 @@ class Config:
     wandb_run_name: str | None = None
 
 
-# =============================================================================
-# Section B: Leaky-hard sigmoids
-# =============================================================================
+# --- Section B: Leaky-hard sigmoids ---
 
 
 class _LowerLeakyHardSigmoid(torch.autograd.Function):
@@ -193,9 +195,7 @@ def upper_leaky(x: Tensor, alpha: float) -> Tensor:
     return torch.where(x > 1, 1 + alpha * (x - 1), x.clamp(0.0, 1.0))
 
 
-# =============================================================================
-# Section C: ComponentLinear wrapper + install helper
-# =============================================================================
+# --- Section C: ComponentLinear wrapper + install helper ---
 
 
 class ComponentLinear(nn.Module):
@@ -283,9 +283,7 @@ def install_components(model: nn.Module, module_to_c: dict[str, int]) -> dict[st
     return wrappers
 
 
-# =============================================================================
-# Section D: CI transformer (global_shared_transformer)
-# =============================================================================
+# --- Section D: CI transformer (global_shared_transformer) ---
 
 
 def precompute_rope(
@@ -400,9 +398,7 @@ class CITransformer(nn.Module):
         return ci_lower, ci_upper, per_module
 
 
-# =============================================================================
-# Section E: Losses + mask/routing sampling
-# =============================================================================
+# --- Section E: Losses + mask/routing sampling ---
 
 
 def faithfulness_loss(wrappers: dict[str, ComponentLinear]) -> Tensor:
@@ -516,9 +512,7 @@ def stochastic_recon_loss(
     return kl_logits(pred, target_logits)
 
 
-# =============================================================================
-# Section F: Persistent PGD
-# =============================================================================
+# --- Section F: Persistent PGD ---
 
 
 class PersistentPGD:
@@ -567,7 +561,7 @@ class PersistentPGD:
             delta_masks[name] = s[..., -1]
         return masks, delta_masks
 
-    def _forward_loss(
+    def recon_loss(
         self,
         target_model: nn.Module,
         wrappers: dict[str, ComponentLinear],
@@ -593,19 +587,9 @@ class PersistentPGD:
         lr: float,
     ) -> None:
         for _ in range(self.cfg.ppgd_inner_steps):
-            loss = self._forward_loss(target_model, wrappers, input_ids, target_logits, ci_lower)
+            loss = self.recon_loss(target_model, wrappers, input_ids, target_logits, ci_lower)
             grads = torch.autograd.grad(loss, list(self.sources.values()), retain_graph=False)
             self._adam_step(dict(zip(self.sources, grads, strict=True)), lr)
-
-    def recon_loss(
-        self,
-        target_model: nn.Module,
-        wrappers: dict[str, ComponentLinear],
-        input_ids: Tensor,
-        target_logits: Tensor,
-        ci_lower: dict[str, Tensor],
-    ) -> Tensor:
-        return self._forward_loss(target_model, wrappers, input_ids, target_logits, ci_lower)
 
     def external_step(self, grads: dict[str, Tensor], lr: float) -> None:
         self._adam_step(grads, lr)
@@ -624,9 +608,7 @@ class PersistentPGD:
                 src.clamp_(0.0, 1.0)
 
 
-# =============================================================================
-# Section G: LR schedule
-# =============================================================================
+# --- Section G: LR schedule ---
 
 
 def cosine_lr(
@@ -646,9 +628,7 @@ def cosine_lr(
     return final + 0.5 * (start - final) * (1 + math.cos(math.pi * progress))
 
 
-# =============================================================================
-# Section H: Distributed setup + SPDModule container
-# =============================================================================
+# --- Section H: Distributed setup + SPDModule container ---
 
 
 def init_dist() -> tuple[int, int, int, torch.device]:
@@ -700,9 +680,7 @@ def _require(x: Tensor | None) -> Tensor:
     return x
 
 
-# =============================================================================
-# Section I: Training loop
-# =============================================================================
+# --- Section I: Training loop ---
 
 
 def decompose(
@@ -775,8 +753,6 @@ def decompose(
     _log("PPGD, optimizer, dataloader ready")
 
     if rank == 0 and cfg.use_wandb:
-        import wandb  # type: ignore[import-untyped]
-
         wandb.init(project=cfg.wandb_project, name=cfg.wandb_run_name)
         _log(f"wandb url: {wandb.run.url if wandb.run else '?'}")
 
@@ -840,14 +816,10 @@ def decompose(
                 world_size,
                 eval_batch,
                 is_slow=is_slow_eval,
+                imp_p=anneal_p(step, cfg.n_steps, cfg.p_start, cfg.p_end),
             )
             if rank == 0 and cfg.use_wandb:
-                import wandb  # type: ignore[import-untyped]
-
-                to_log: dict[str, Any] = {}
-                for k, v in eval_metrics.items():
-                    to_log[k] = wandb.Histogram(v.tolist()) if isinstance(v, Tensor) else v
-                wandb.log(to_log, step=step)
+                wandb.log(eval_metrics, step=step)
 
         if rank == 0 and step % cfg.log_every == 0:
             metrics = {
@@ -860,8 +832,6 @@ def decompose(
                 "step": step,
             }
             if cfg.use_wandb:
-                import wandb  # type: ignore[import-untyped]
-
                 wandb.log(metrics, step=step)
             else:
                 print(
@@ -876,13 +846,9 @@ def decompose(
         dist.destroy_process_group()
 
 
-# =============================================================================
-# Section J: Eval metrics
-# =============================================================================
-# Each function runs on a single eval batch and returns a `dict[str, float | Tensor]`.
-# 1D tensors are converted to `wandb.Histogram` at log time; scalars are logged as floats.
-# Cross-rank reduction is `dist.ReduceOp.AVG` for scalar metrics and `all_gather` for
-# histograms.
+# --- Section J: Eval metrics ---
+# Key naming matches `param_decomp/experiments/lm/lm_decomposition.py` so nano and main runs
+# can be overlaid in the same W&B dashboard.
 
 
 def _all_reduce_mean(t: Tensor, world_size: int) -> Tensor:
@@ -902,13 +868,24 @@ def _ce_next_token(logits: Tensor, input_ids: Tensor) -> float:
     return F.cross_entropy(flat_logits[:-1], flat_labels[1:], ignore_index=-100).item()
 
 
-def eval_ci_l0(ci_lower: dict[str, Tensor], threshold: float, world_size: int) -> dict[str, float]:
-    """Per-module mean count of components with `ci > threshold` per position."""
-    out: dict[str, float] = {}
+def eval_ci_l0(
+    ci_lower: dict[str, Tensor], threshold: float, world_size: int, use_wandb: bool
+) -> dict[str, Any]:
+    per_module: dict[str, float] = {}
     for name, ci in ci_lower.items():
         l0 = (ci > threshold).float().sum(-1).mean()
-        l0 = _all_reduce_mean(l0.clone(), world_size)
-        out[f"eval/l0/{name}"] = l0.item()
+        per_module[name] = _all_reduce_mean(l0.clone(), world_size).item()
+    total = sum(per_module.values())
+    out: dict[str, Any] = {f"eval/l0/{threshold}_{n}": v for n, v in per_module.items()}
+    out[f"eval/l0/{threshold}_total"] = total
+    if use_wandb:
+        table_data = list(per_module.items()) + [("total", total)]
+        out["eval/l0/bar_chart"] = wandb.plot.bar(
+            table=wandb.Table(columns=["layer", "l0"], data=table_data),
+            label="layer",
+            value="l0",
+            title=f"L0_{threshold}",
+        )
     return out
 
 
@@ -943,42 +920,22 @@ def eval_ce_kl_losses(
     B, S = input_ids.shape
     device = input_ids.device
     zeros_bs = torch.zeros(B, S, device=device)
-
-    def strat_ci():
-        return {n: ci for n, ci in ci_lower.items()}, {n: zeros_bs for n in ci_lower}
-
-    def strat_stoch():
-        return sample_continuous_masks(ci_lower)
-
-    def strat_unmasked():
-        return {n: torch.ones_like(c) for n, c in ci_lower.items()}, {n: zeros_bs for n in ci_lower}
-
-    def strat_random():
-        return {n: torch.rand_like(c) for n, c in ci_lower.items()}, {n: zeros_bs for n in ci_lower}
-
-    def strat_rounded():
-        return (
+    zeros_delta = {n: zeros_bs for n in ci_lower}
+    stoch_masks, stoch_delta = sample_continuous_masks(ci_lower)
+    strategies: dict[str, tuple[dict[str, Tensor], dict[str, Tensor]]] = {
+        "ci_masked": ({n: ci for n, ci in ci_lower.items()}, zeros_delta),
+        "unmasked": ({n: torch.ones_like(c) for n, c in ci_lower.items()}, zeros_delta),
+        "stoch_masked": (stoch_masks, stoch_delta),
+        "random_masked": ({n: torch.rand_like(c) for n, c in ci_lower.items()}, zeros_delta),
+        "rounded_masked": (
             {n: (c > rounding_threshold).to(c.dtype) for n, c in ci_lower.items()},
-            {n: zeros_bs for n in ci_lower},
-        )
-
-    def strat_zero():
-        return {n: torch.zeros_like(c) for n, c in ci_lower.items()}, {
-            n: zeros_bs for n in ci_lower
-        }
-
-    strategies = {
-        "ci_masked": strat_ci,
-        "unmasked": strat_unmasked,
-        "stoch_masked": strat_stoch,
-        "random_masked": strat_random,
-        "rounded_masked": strat_rounded,
-        "zero_masked": strat_zero,
+            zeros_delta,
+        ),
+        "zero_masked": ({n: torch.zeros_like(c) for n, c in ci_lower.items()}, zeros_delta),
     }
     kls: dict[str, float] = {}
     ces: dict[str, float] = {}
-    for name, build in strategies.items():
-        masks, delta_masks = build()
+    for name, (masks, delta_masks) in strategies.items():
         logits = _forward_with_masks(target_model, wrappers, input_ids, masks, delta_masks)
         kls[name] = kl_logits(logits, target_logits).item()
         ces[name] = _ce_next_token(logits, input_ids)
@@ -1027,24 +984,22 @@ def eval_pgd_recon(
             dist.broadcast(src, src=0)
         sources[name] = src.requires_grad_(True)
 
-    def build_masks() -> tuple[dict[str, Tensor], dict[str, Tensor]]:
+    def compute_loss() -> Tensor:
         masks: dict[str, Tensor] = {}
         delta_masks: dict[str, Tensor] = {}
         for name, ci in ci_lower.items():
             s_expanded = sources[name].expand(B, S, -1)
             masks[name] = ci + (1 - ci) * s_expanded[..., :-1]
             delta_masks[name] = s_expanded[..., -1]
-        return masks, delta_masks
+        set_wrapper_masks(wrappers, masks, delta_masks, routing=None)
+        try:
+            return kl_logits(target_model(input_ids), target_logits)
+        finally:
+            clear_wrapper_masks(wrappers)
 
     with torch.enable_grad():
         for _ in range(n_steps):
-            masks, delta_masks = build_masks()
-            set_wrapper_masks(wrappers, masks, delta_masks, routing=None)
-            try:
-                logits = target_model(input_ids)
-            finally:
-                clear_wrapper_masks(wrappers)
-            loss = kl_logits(logits, target_logits)
+            loss = compute_loss()
             grads = torch.autograd.grad(loss, list(sources.values()))
             with torch.no_grad():
                 for name, g in zip(sources, grads, strict=True):
@@ -1052,56 +1007,59 @@ def eval_pgd_recon(
                         dist.all_reduce(g, op=dist.ReduceOp.AVG)
                     sources[name].add_(step_size * g.sign())
                     sources[name].clamp_(0.0, 1.0)
+        final_loss = compute_loss()
 
-        masks, delta_masks = build_masks()
-        set_wrapper_masks(wrappers, masks, delta_masks, routing=None)
-        try:
-            logits = target_model(input_ids)
-        finally:
-            clear_wrapper_masks(wrappers)
-        final_loss = kl_logits(logits, target_logits)
-
-    return {"eval/pgd_recon_loss": _all_reduce_mean(final_loss.detach().clone(), world_size).item()}
+    return {
+        "eval/loss/PGDReconLoss": _all_reduce_mean(final_loss.detach().clone(), world_size).item()
+    }
 
 
-def eval_component_activation_density(
-    ci_lower: dict[str, Tensor], threshold: float, world_size: int
-) -> dict[str, Tensor]:
-    """Per-component fraction of (batch, pos) where ci > threshold. Returned as 1D per-module tensors
-    (one entry per component); logged as `wandb.Histogram` at the call site."""
-    out: dict[str, Tensor] = {}
+def _plot_mean_ci_per_component(mean_component_cis: dict[str, Tensor], log_y: bool) -> Image.Image:
+    n_modules = len(mean_component_cis)
+    max_rows = 6
+    n_cols = (n_modules + max_rows - 1) // max_rows
+    n_rows = min(n_modules, max_rows)
+    fig, axs = plt.subplots(
+        n_rows, n_cols, figsize=(8 * n_cols, 3 * n_rows), dpi=200, squeeze=False
+    )
+    axs = np.array(axs).reshape(n_rows, n_cols)
+    for i in range(n_modules, n_rows * n_cols):
+        axs[i % n_rows, i // n_rows].set_visible(False)
+    for i, (module_name, mean_ci) in enumerate(mean_component_cis.items()):
+        sorted_cis = torch.sort(mean_ci, descending=True)[0].detach().float().cpu().numpy()
+        ax = axs[i % n_rows, i // n_rows]
+        if log_y:
+            ax.set_yscale("log")
+        ax.scatter(range(len(sorted_cis)), sorted_cis, marker="x", s=10)
+        if i % n_rows == n_rows - 1 or i == n_modules - 1:
+            ax.set_xlabel("Component")
+        ax.set_ylabel("mean CI")
+        ax.set_title(module_name, fontsize=10)
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).copy()
+
+
+def eval_ci_mean_per_component_figs(
+    ci_lower: dict[str, Tensor], world_size: int, use_wandb: bool
+) -> dict[str, Any]:
+    if not use_wandb:
+        return {}
+    mean_per_module: dict[str, Tensor] = {}
     for name, ci in ci_lower.items():
-        B, S = ci.shape[:2]
-        active = (ci > threshold).to(ci.dtype).sum(dim=(0, 1)) / (B * S)
-        out[f"eval/density/{name}"] = _all_reduce_mean(active.clone(), world_size).cpu()
-    return out
-
-
-def eval_ci_mean_per_component(ci_lower: dict[str, Tensor], world_size: int) -> dict[str, Tensor]:
-    """Per-module per-component mean CI value; 1D tensor per module."""
-    out: dict[str, Tensor] = {}
-    for name, ci in ci_lower.items():
-        mean_c = ci.mean(dim=(0, 1))
-        out[f"eval/ci_mean/{name}"] = _all_reduce_mean(mean_c.clone(), world_size).cpu()
-    return out
-
-
-def eval_ci_histograms(
-    ci_lower: dict[str, Tensor],
-    ci_pre_sigmoid: dict[str, Tensor],
-    world_size: int,
-) -> dict[str, Tensor]:
-    """Flattened CI value distributions (both post- and pre-sigmoid) gathered across ranks."""
-    out: dict[str, Tensor] = {}
-    for name in ci_lower:
-        for prefix, src in [("ci_hist", ci_lower), ("ci_hist_pre_sigmoid", ci_pre_sigmoid)]:
-            t = src[name].detach().flatten()
-            if world_size > 1:
-                buf = torch.empty(world_size * t.numel(), device=t.device, dtype=t.dtype)
-                dist.all_gather_into_tensor(buf, t)
-                t = buf
-            out[f"eval/{prefix}/{name}"] = t.cpu()
-    return out
+        mean_c = ci.mean(dim=tuple(range(ci.ndim - 1)))
+        mean_per_module[name] = _all_reduce_mean(mean_c.clone(), world_size).cpu()
+    return {
+        "eval/figures/ci_mean_per_component": wandb.Image(
+            _plot_mean_ci_per_component(mean_per_module, log_y=False)
+        ),
+        "eval/figures/ci_mean_per_component_log": wandb.Image(
+            _plot_mean_ci_per_component(mean_per_module, log_y=True)
+        ),
+    }
 
 
 def eval_hidden_acts_recon(
@@ -1136,7 +1094,7 @@ def eval_hidden_acts_recon(
         clear_wrapper_masks(wrappers)
     comp_acts = {n: _require(w.last_output) for n, w in wrappers.items()}
 
-    tag = "stoch" if stochastic else "ci"
+    metric_name = "StochasticHiddenActsReconLoss" if stochastic else "CIHiddenActsReconLoss"
     per_module: dict[str, float] = {}
     total_sq = torch.zeros((), device=input_ids.device)
     total_n = 0
@@ -1146,9 +1104,34 @@ def eval_hidden_acts_recon(
         per_module[name] = mse.item()
         total_sq = total_sq + mse * target_acts[name].numel()
         total_n += target_acts[name].numel()
-    out = {f"eval/hidden_recon_{tag}/{n}": v for n, v in per_module.items()}
-    out[f"eval/hidden_recon_{tag}/total"] = (total_sq / total_n).item()
+    out = {f"eval/loss/{metric_name}/{n}": v for n, v in per_module.items()}
+    out[f"eval/loss/{metric_name}/total"] = (total_sq / total_n).item()
     return out
+
+
+def eval_train_losses(
+    target_model: nn.Module,
+    wrappers: dict[str, ComponentLinear],
+    eval_batch: Tensor,
+    target_logits: Tensor,
+    ci_lower: dict[str, Tensor],
+    ci_upper: dict[str, Tensor],
+    cfg: Config,
+    world_size: int,
+    imp_p: float,
+) -> dict[str, float]:
+    faith = faithfulness_loss(wrappers)
+    imp = importance_minimality_loss(ci_upper, imp_p, cfg.imp_eps, cfg.imp_beta, world_size)
+    stoch = stochastic_recon_loss(target_model, wrappers, eval_batch, target_logits, ci_lower)
+    return {
+        "eval/loss/FaithfulnessLoss": _all_reduce_mean(faith.detach().clone(), world_size).item(),
+        "eval/loss/ImportanceMinimalityLoss": _all_reduce_mean(
+            imp.detach().clone(), world_size
+        ).item(),
+        "eval/loss/StochasticReconSubsetLoss": _all_reduce_mean(
+            stoch.detach().clone(), world_size
+        ).item(),
+    }
 
 
 def run_eval(
@@ -1159,39 +1142,46 @@ def run_eval(
     world_size: int,
     eval_batch: Tensor,
     is_slow: bool,
-) -> dict[str, float | Tensor]:
-    """Compute all applicable eval metrics on one batch. Returns a flat dict of scalars and 1D
-    tensors (tensors are converted to `wandb.Histogram` at log time)."""
-    metrics: dict[str, float | Tensor] = {}
+    imp_p: float,
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
     for w in wrappers.values():
         w.cache_output = False
     try:
-        # Target forward + CI forward (no grad). Uses `last_input` cache populated by target mode.
         with torch.no_grad():
             clear_wrapper_masks(wrappers)
             target_logits = target_model(eval_batch)
             acts = {n: _require(w.last_input) for n, w in wrappers.items()}
-            ci_lower, _ci_upper, ci_pre_sigmoid = ci_fn(acts)
+            ci_lower, ci_upper, _ci_pre_sigmoid = ci_fn(acts)
 
-            metrics.update(eval_ci_l0(ci_lower, cfg.ci_alive_threshold, world_size))
+            metrics.update(eval_ci_l0(ci_lower, cfg.ci_alive_threshold, world_size, cfg.use_wandb))
             metrics.update(
                 eval_ce_kl_losses(
-                    target_model,
-                    wrappers,
-                    eval_batch,
-                    target_logits,
-                    ci_lower,
-                    cfg.rounding_threshold,
-                    world_size,
+                    target_model=target_model,
+                    wrappers=wrappers,
+                    input_ids=eval_batch,
+                    target_logits=target_logits,
+                    ci_lower=ci_lower,
+                    rounding_threshold=cfg.rounding_threshold,
+                    world_size=world_size,
+                )
+            )
+            metrics.update(
+                eval_train_losses(
+                    target_model=target_model,
+                    wrappers=wrappers,
+                    eval_batch=eval_batch,
+                    target_logits=target_logits,
+                    ci_lower=ci_lower,
+                    ci_upper=ci_upper,
+                    cfg=cfg,
+                    world_size=world_size,
+                    imp_p=imp_p,
                 )
             )
 
             if is_slow:
-                metrics.update(
-                    eval_component_activation_density(ci_lower, cfg.ci_alive_threshold, world_size)
-                )
-                metrics.update(eval_ci_mean_per_component(ci_lower, world_size))
-                metrics.update(eval_ci_histograms(ci_lower, ci_pre_sigmoid, world_size))
+                metrics.update(eval_ci_mean_per_component_figs(ci_lower, world_size, cfg.use_wandb))
                 for w in wrappers.values():
                     w.cache_output = True
                 for stoch in (True, False):

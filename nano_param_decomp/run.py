@@ -123,7 +123,7 @@ class Config:
 
     # Persistent PGD (per_batch_per_position scope, Adam)
     ppgd_lr: float = 0.01
-    ppgd_lr_final_frac: float = 0.1
+    ppgd_lr_final_frac: float = 1.0
     ppgd_warmup_pct: float = 0.025
     ppgd_beta1: float = 0.5
     ppgd_beta2: float = 0.99

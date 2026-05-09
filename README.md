@@ -30,13 +30,20 @@ The Phase-1 code does not depend on the param-decomp package — only `torch`, `
 From the repo root:
 
 ```bash
+# RMSNorm baseline (v5)
 PYTHONPATH=. OMP_NUM_THREADS=1 \
     ~/miniconda3/envs/bilinear-vpd/bin/python -m phase1.main \
     --out runs/v5 --n_steps 25000 --batch_size 512 --lr 1e-3 \
-    --eval_every 1000 --num_data_workers 32
+    --eval_every 1000 --num_data_workers 32 --norm_type rmsnorm
+
+# Truly-bilinear (v12, Phase-2 target)
+PYTHONPATH=. OMP_NUM_THREADS=1 \
+    ~/miniconda3/envs/bilinear-vpd/bin/python -m phase1.main \
+    --out runs/v12 --n_steps 100000 --batch_size 512 --lr 1e-3 \
+    --eval_every 5000 --num_data_workers 32 --norm_type channel
 ```
 
-These are the hyperparameters of the trained checkpoint shipped in `runs/v5/` — they hit all per-primitive KL targets on a single RTX 3090 in about 6 minutes. On CPU only, drop `num_data_workers` to 0 and reduce `batch_size`/`n_steps`.
+v5 takes ~6 min on a single RTX 3090; v12 takes ~15 min. On CPU only, drop `num_data_workers` to 0 and reduce `batch_size`/`n_steps`.
 
 Outputs land in the chosen `--out` directory:
 
@@ -72,7 +79,11 @@ Each eval log line contains:
 
 Phase-1 success criterion (from the spec): `kl_bigram ≤ 0.1`, `kl_skip ≤ 0.1`, `kl_induction ≤ 0.3`. The skip-trigram primitive is deterministic so `H_skip = 0` and `kl_skip = ce_skip = -log p_model[true]`. For bigram and induction, `H_*` is positive — the floor `kl = 0` corresponds to the model exactly matching the ground-truth conditional.
 
-The shipped `runs/v5/model_final.pt` checkpoint hits:
+### Two reference checkpoints
+
+The repo ships two trained checkpoints with different normalization choices:
+
+**`runs/v5/model_final.pt` — RMSNorm baseline.** Hits all spec targets cleanly but uses RMSNorm (non-polynomial in parameters), so it's not directly suitable for VPD analysis.
 
 | primitive   | KL (nats) | top-1 | target KL |
 | ----------- | --------- | ----- | --------- |
@@ -80,7 +91,17 @@ The shipped `runs/v5/model_final.pt` checkpoint hits:
 | skip-trigram | 0.031    | 0.993 | ≤ 0.1     |
 | induction   | 0.269     | 0.951 | ≤ 0.3     |
 
-Induction goes through a sharp phase change around step 8k–10k where KL drops from ~2.8 to ~1.0 over a few hundred steps; before that it is stuck at the entropy of "uniform over content tokens".
+**`runs/v12_chan_long/model_final.pt` — truly bilinear (Phase-2 target).** Pre-norm is a learnable per-channel scale (`y = diag(s) · x`), which keeps the network parameter-polynomial as VPD requires. Trained for 100k steps at lr=1e-3.
+
+| primitive   | KL (nats) | top-1 | spec target | vs RMSNorm |
+| ----------- | --------- | ----- | ----------- | --------- |
+| bigram      | 0.001     | 1.000 | ≤ 0.1       | ≈ same   |
+| skip-trigram | 0.038    | 0.992 | ≤ 0.1       | ≈ same   |
+| induction   | 0.361     | 0.978 | ≤ 0.3       | +0.09 KL, +0.03 top-1 |
+
+The bilinear-norm path stalls at KL ≈ 3.1 with the v5 hyperparams (25k @ lr=1e-3) — phase change requires either higher LR or longer training. See `runs/v6..v13` for the full sweep.
+
+Induction in both checkpoints exhibits a sharp phase change: KL plateaus near `H(uniform over content tokens) ≈ 3.4` for the first 8k–20k steps, then drops to ~1.0 over a few thousand steps as the prev-token-head + copying-head circuit forms.
 
 ## Key design choices
 
@@ -90,7 +111,11 @@ These were decided during the planning conversation (also recorded at the bottom
 - **Smoothed induction**: ground truth at induction positions is `0.9 · δ_induced + 0.1 · uniform_over_content_tokens` rather than a hard delta — avoids pathological infinite-KL during training.
 - **`1/√d_head` scaling** on each raw QK product before the elementwise product, for stability without softmax.
 - **No biases anywhere** — Q/K/V/O, both MLP arms, output projection, unembed.
-- **RMSNorm before each sublayer + before unembed** (no learnable affine — the norm is the only non-bilinear operation in the network). Without it the induction circuit does not form within 50k steps; with it the circuit emerges around step 8k. Toggle via `ModelConfig.use_rmsnorm`.
+- **`ModelConfig.norm_type` selects the pre-norm**:
+  - `rmsnorm` (per-token RMS divide) — fastest convergence, but non-polynomial in parameters (rules out VPD).
+  - `channel` (learnable per-channel scale `y = diag(s) · x`) — fully bilinear in parameters, but stalls at v5's hyperparams; needs higher LR or much longer training to phase-change. **Default for the truly-bilinear Phase-2 target.**
+  - `scalar` — single learnable scalar per sublayer; bilinear but underpowered, stalls at higher KL than `channel`.
+  - `none` — no normalization; induction circuit fails to form for any setting we tried.
 - **All weight matrices are separate `nn.Linear` modules** at predictable paths (`blocks.{i}.attn.{q1,q2,k1,k2,v,o}_proj`, `blocks.{i}.mlp.{w_m,w_n,w_proj}`) — required by `param_decomp.models.component_model.ComponentModel`.
 
 ## Phase-2 hand-off

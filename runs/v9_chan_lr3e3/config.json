@@ -1,0 +1,65 @@
+{
+  "dgp": {
+    "vocab": {
+      "n_subj": 8,
+      "n_verb": 12,
+      "n_loc": 8,
+      "n_adj": 8,
+      "n_conn": 8,
+      "n_filler": 16
+    },
+    "seq_len": 64,
+    "seed": 0,
+    "bigram_top_k": 3,
+    "bigram_probs": [
+      0.7,
+      0.2,
+      0.1
+    ],
+    "skip_trigram_n_pairs": 24,
+    "skip_trigram_max_skip": 12,
+    "induction_smoothing": 0.1,
+    "default_p_filler": 0.55,
+    "default_p_subj": 0.1,
+    "default_p_loc": 0.12,
+    "default_p_adj": 0.1,
+    "default_p_verb": 0.06,
+    "default_p_conn": 0.07
+  },
+  "model": {
+    "vocab_size": 63,
+    "seq_len": 64,
+    "d_model": 64,
+    "d_head": 32,
+    "d_mlp": 128,
+    "n_layers": 2,
+    "rope_base": 10000.0,
+    "norm_type": "channel",
+    "init_std": 0.02,
+    "norm_init": 1.0
+  },
+  "train": {
+    "lr": 0.003,
+    "weight_decay": 0.01,
+    "betas": [
+      0.9,
+      0.95
+    ],
+    "batch_size": 512,
+    "n_steps": 50000,
+    "warmup_steps": 1000,
+    "eval_every": 2000,
+    "eval_n_batches": 8,
+    "checkpoint_steps": [
+      500,
+      1000,
+      2000,
+      5000,
+      10000,
+      20000
+    ],
+    "seed": 0,
+    "num_data_workers": 32
+  },
+  "out_dir": "runs/v9_chan_lr3e3"
+}

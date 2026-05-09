@@ -1,6 +1,7 @@
 import argparse
+from typing import get_args
 
-from phase1.config import RunConfig, default_dgp, default_model, default_train
+from phase1.config import NormType, RunConfig, default_dgp, default_model, default_train
 from phase1.train import train
 
 
@@ -20,6 +21,9 @@ def main() -> None:
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--eval_every", type=int, default=None)
     parser.add_argument("--num_data_workers", type=int, default=None)
+    parser.add_argument("--norm_type", choices=list(get_args(NormType)), default=None)
+    parser.add_argument("--init_std", type=float, default=None)
+    parser.add_argument("--weight_decay", type=float, default=None)
     args = parser.parse_args()
     cfg = make_default_run(out_dir=args.out, seed=args.seed)
     if args.n_steps is not None:
@@ -32,6 +36,12 @@ def main() -> None:
         cfg.train.eval_every = args.eval_every
     if args.num_data_workers is not None:
         cfg.train.num_data_workers = args.num_data_workers
+    if args.norm_type is not None:
+        cfg.model.norm_type = args.norm_type
+    if args.init_std is not None:
+        cfg.model.init_std = args.init_std
+    if args.weight_decay is not None:
+        cfg.train.weight_decay = args.weight_decay
     train(cfg)
 
 

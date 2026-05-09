@@ -206,4 +206,8 @@ These are choices made during the planning conversation, recorded here so future
 - **No biases** on Q/K/V/O, MLP arms, or output projection — keeps the architecture cleanly bilinear.
 - **Logging**: plain stdout + jsonl events; no WandB initially.
 - **Codebase**: forked from `goodfire-ai/param-decomp` rather than written fresh, to make Phase 2 (applying VPD) easier.
-- **RMSNorm fallback enabled.** Without normalization the induction circuit would not form (KL stuck at ~3.2 even after 50k steps at lr=1e-3). With pre-RMSNorm before each sublayer + a final pre-unembed norm, induction transitions through a phase change around step 7k–10k and converges to the target. The norms have no learnable affine — they preserve the parameter-bilinear structure.
+- **RMSNorm vs. truly-bilinear normalization.** RMSNorm is non-polynomial in inputs (and indirectly in parameters), which would sink VPD. We therefore prefer a normalization that preserves parameter-polynomial structure. Configurable via `ModelConfig.norm_type ∈ {none, scalar, channel, rmsnorm}`:
+  - `rmsnorm` (v5 baseline): hits all KL targets (induction 0.27) but breaks parameter-polynomial structure.
+  - `none` / `scalar` / `channel` with v5 hyperparams (25k steps, lr=1e-3): induction stalls at KL ≈ 3.1 — phase change does not fire.
+  - `channel` with longer training and/or higher LR: phase change fires (lr=3e-3 at step ~16k; 100k-step run still descending). Best truly-bilinear run is **v12** (`channel`, 100k steps, lr=1e-3): induction KL = 0.361, top-1 = 0.978.
+  - **Phase-2 hand-off:** the `runs/v12_chan_long/` checkpoint is the truly-bilinear target for VPD. Bigram and skip-trigram are essentially perfect (KL ≤ 0.04); induction is slightly above the original 0.3 target but top-1 matches the RMSNorm baseline.

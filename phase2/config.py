@@ -28,7 +28,9 @@ class VPDConfig:
 
     coeff_faith: float
     coeff_stoch_recon: float
-    coeff_imp: float
+    coeff_imp: float  # target (final) value, after annealing
+    coeff_imp_anneal_start_frac: float  # frac of training where imp coeff starts ramping up from 0
+    coeff_imp_anneal_end_frac: float    # frac of training where imp coeff reaches target
     pnorm_start: float
     pnorm_end: float
     pnorm_anneal_start_frac: float
@@ -64,6 +66,8 @@ def default_vpd_config(target_run_dir: str, out_dir: str) -> VPDConfig:
         coeff_faith=1e7,
         coeff_stoch_recon=0.5,
         coeff_imp=1e-3,
+        coeff_imp_anneal_start_frac=0.0,  # default: no anneal (constant coeff_imp)
+        coeff_imp_anneal_end_frac=0.0,
         pnorm_start=2.0,
         pnorm_end=0.4,
         pnorm_anneal_start_frac=0.0,

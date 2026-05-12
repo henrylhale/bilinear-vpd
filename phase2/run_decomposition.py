@@ -43,9 +43,29 @@ def cosine_lr(step: int, base_lr: float, warmup: int, total: int, min_frac: floa
     return base_lr * (min_frac + (1.0 - min_frac) * 0.5 * (1.0 + math.cos(math.pi * progress)))
 
 
+def coeff_imp_schedule(step: int, target: float, n_steps: int, start_frac: float, end_frac: float) -> float:
+    """Linear anneal from 0 to target between start_frac and end_frac of training.
+    end_frac <= start_frac means constant `target` from step 0."""
+    if end_frac <= start_frac:
+        return target
+    start_step = start_frac * n_steps
+    end_step = end_frac * n_steps
+    if step < start_step:
+        return 0.0
+    if step >= end_step:
+        return target
+    return target * (step - start_step) / (end_step - start_step)
+
+
 def load_target_model(run_dir: Path) -> tuple[BilinearTransformer, ModelConfig]:
     raw = json.loads((run_dir / "config.json").read_text())
-    mcfg = ModelConfig(**raw["model"])
+    model_dict = dict(raw["model"])
+    # Pre-refactor configs stored `norm_type` (and the channel-scale case was always
+    # called "channel"). The refactored ModelConfig assumes channel-scale and has
+    # no norm_type field. Drop it on load so we can read pre-refactor checkpoints.
+    nt = model_dict.pop("norm_type", "channel")
+    assert nt == "channel", f"cannot load checkpoint with norm_type={nt!r}; only channel-scale is supported"
+    mcfg = ModelConfig(**model_dict)
     model = BilinearTransformer(mcfg)
     sd = torch.load(run_dir / "model_final.pt", map_location="cpu", weights_only=True)
     model.load_state_dict(sd)
@@ -137,8 +157,12 @@ def main() -> None:
     parser.add_argument("--n_steps", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
     parser.add_argument("--lr", type=float, default=None)
-    parser.add_argument("--coeff_imp", type=float, default=None)
+    parser.add_argument("--coeff_imp", type=float, default=None,
+                        help="target (final) coeff_imp; ramp from 0 to this if --coeff_imp_anneal_end_frac > 0")
+    parser.add_argument("--coeff_imp_anneal_start_frac", type=float, default=None)
+    parser.add_argument("--coeff_imp_anneal_end_frac", type=float, default=None)
     parser.add_argument("--num_data_workers", type=int, default=None)
+    parser.add_argument("--eval_every", type=int, default=None)
     parser.add_argument("--seed", type=int, default=0)
     args = parser.parse_args()
 
@@ -153,8 +177,14 @@ def main() -> None:
         cfg.lr = args.lr
     if args.coeff_imp is not None:
         cfg.coeff_imp = args.coeff_imp
+    if args.coeff_imp_anneal_start_frac is not None:
+        cfg.coeff_imp_anneal_start_frac = args.coeff_imp_anneal_start_frac
+    if args.coeff_imp_anneal_end_frac is not None:
+        cfg.coeff_imp_anneal_end_frac = args.coeff_imp_anneal_end_frac
     if args.num_data_workers is not None:
         cfg.num_data_workers = args.num_data_workers
+    if args.eval_every is not None:
+        cfg.eval_every = args.eval_every
 
     torch.manual_seed(cfg.seed)
     torch.set_num_threads(1)
@@ -225,12 +255,16 @@ def main() -> None:
                 router=AllLayersRouter(),
             )
             current_frac = step / max(1, cfg.n_steps)
+            current_coeff_imp = coeff_imp_schedule(
+                step, cfg.coeff_imp, cfg.n_steps,
+                cfg.coeff_imp_anneal_start_frac, cfg.coeff_imp_anneal_end_frac,
+            )
             losses = compute_losses(
                 loss_metric_configs=[
                     FaithfulnessLossConfig(coeff=cfg.coeff_faith),
                     StochasticReconLossConfig(coeff=cfg.coeff_stoch_recon),
                     ImportanceMinimalityLossConfig(
-                        coeff=cfg.coeff_imp,
+                        coeff=current_coeff_imp,
                         pnorm=cfg.pnorm_start,
                         beta=cfg.beta_imp,
                         p_anneal_final_p=cfg.pnorm_end,
@@ -259,8 +293,12 @@ def main() -> None:
         do_eval = (step % cfg.eval_every == 0) or (step == cfg.n_steps)
         if do_eval:
             metrics = evaluate(cm, dgp, eval_rng, cfg.batch_size, cfg.eval_n_batches, device)
-            print(f"--- eval @ step {step}: recon_kl={metrics['eval_recon_kl']:.4f}  ci_l0_frac={metrics['eval_ci_l0_frac']:.3f} ---")
-            log_f.write(json.dumps({"step": step, "lr": lr, "train_total": last_train, **metrics}) + "\n")
+            current_coeff_imp_eval = coeff_imp_schedule(
+                step, cfg.coeff_imp, cfg.n_steps,
+                cfg.coeff_imp_anneal_start_frac, cfg.coeff_imp_anneal_end_frac,
+            )
+            print(f"--- eval @ step {step}: recon_kl={metrics['eval_recon_kl']:.4f}  ci_l0_frac={metrics['eval_ci_l0_frac']:.3f}  coeff_imp={current_coeff_imp_eval:.2e} ---")
+            log_f.write(json.dumps({"step": step, "lr": lr, "train_total": last_train, "coeff_imp": current_coeff_imp_eval, **metrics}) + "\n")
             log_f.flush()
 
         if step in cfg.checkpoint_steps:

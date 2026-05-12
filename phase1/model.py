@@ -6,7 +6,7 @@ from einops import einsum
 from jaxtyping import Bool, Float, Int
 from torch import Tensor
 
-from phase1.config import ModelConfig, NormType
+from phase1.config import ModelConfig
 
 
 def precompute_rope(
@@ -90,32 +90,10 @@ class BilinearMLP(nn.Module):
         return self.w_proj(self.w_m(x) * self.w_n(x))
 
 
-class RMSNorm(nn.Module):
-    """Per-token RMS normalization (non-polynomial in inputs; included for the
-    interpretability-trade-off baseline only — VPD-aligned configs avoid this)."""
-
-    def __init__(self, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-
-    def forward(self, x: Float[Tensor, "... D"]) -> Float[Tensor, "... D"]:
-        return x * torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
-
-
-class LearnableScalar(nn.Module):
-    """y = s · x with a single learnable scalar s. Linear in both x and s."""
-
-    def __init__(self, init: float = 1.0):
-        super().__init__()
-        self.scale = nn.Parameter(torch.tensor(init))
-
-    def forward(self, x: Float[Tensor, "... D"]) -> Float[Tensor, "... D"]:
-        return x * self.scale
-
-
 class LearnableChannelScale(nn.Module):
     """y = diag(s) · x, learnable per-channel scale of length d_model.
-    Linear in both x and s."""
+    Linear in both x and s — preserves parameter-polynomial structure (needed
+    for VPD). The only pre-norm in the network."""
 
     def __init__(self, d_model: int, init: float = 1.0):
         super().__init__()
@@ -125,25 +103,13 @@ class LearnableChannelScale(nn.Module):
         return x * self.scale
 
 
-def make_norm(norm_type: NormType, d_model: int, init: float) -> nn.Module:
-    match norm_type:
-        case "none":
-            return nn.Identity()
-        case "scalar":
-            return LearnableScalar(init=init)
-        case "channel":
-            return LearnableChannelScale(d_model, init=init)
-        case "rmsnorm":
-            return RMSNorm()
-
-
 class BilinearBlock(nn.Module):
     def __init__(self, cfg: ModelConfig):
         super().__init__()
         self.attn = BilinearAttention(cfg.d_model, cfg.d_head)
         self.mlp = BilinearMLP(cfg.d_model, cfg.d_mlp)
-        self.norm_attn = make_norm(cfg.norm_type, cfg.d_model, cfg.norm_init)
-        self.norm_mlp = make_norm(cfg.norm_type, cfg.d_model, cfg.norm_init)
+        self.norm_attn = LearnableChannelScale(cfg.d_model, init=cfg.norm_init)
+        self.norm_mlp = LearnableChannelScale(cfg.d_model, init=cfg.norm_init)
 
     def forward(
         self,
@@ -169,7 +135,7 @@ class BilinearTransformer(nn.Module):
         self.cfg = cfg
         self.embed = nn.Embedding(cfg.vocab_size, cfg.d_model)
         self.blocks = nn.ModuleList([BilinearBlock(cfg) for _ in range(cfg.n_layers)])
-        self.final_norm = make_norm(cfg.norm_type, cfg.d_model, cfg.norm_init)
+        self.final_norm = LearnableChannelScale(cfg.d_model, init=cfg.norm_init)
         self.unembed = nn.Linear(cfg.d_model, cfg.vocab_size, bias=False)
         self._init_weights()
         cos, sin = precompute_rope(cfg.seq_len, cfg.d_head, cfg.rope_base, torch.device("cpu"))

@@ -1,7 +1,4 @@
 from dataclasses import dataclass, field
-from typing import Literal
-
-NormType = Literal["none", "scalar", "channel", "rmsnorm"]
 
 
 @dataclass
@@ -56,7 +53,6 @@ class ModelConfig:
     n_layers: int
 
     rope_base: float
-    norm_type: NormType
     init_std: float
     norm_init: float
 
@@ -116,7 +112,6 @@ def default_model(vocab_size: int, seq_len: int) -> ModelConfig:
         d_mlp=128,
         n_layers=2,
         rope_base=10000.0,
-        norm_type="rmsnorm",
         init_std=0.02,
         norm_init=1.0,
     )

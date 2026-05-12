@@ -130,22 +130,23 @@ def test_induction_empirical_concentration(dgp: DGP, big_sample):
 
 
 def test_induction_uniqueness_holds(dgp: DGP, big_sample):
-    """Every induction firing must correspond to a unique earlier X-Y bigram."""
+    """Every induction firing must correspond to a unique earlier occurrence of the
+    current token X = tokens[t-1] at some position s in [0, t-3], with the past
+    follower tokens[s+1] equal to the recorded induced token."""
     toks, anns, inds = big_sample
     mask = anns == ANN_INDUCTION
     bs, ts = np.nonzero(mask)
     for b, t in zip(bs.tolist(), ts.tolist()):
-        X = int(toks[b, t - 2])
-        Y = int(toks[b, t - 1])
+        X = int(toks[b, t - 1])
         seq = toks[b]
         count = 0
         last_s = -1
         for s in range(t - 2):
-            if int(seq[s]) == X and int(seq[s + 1]) == Y:
+            if int(seq[s]) == X:
                 count += 1
                 last_s = s
-        assert count == 1, f"induction at t={t} has {count} earlier matches"
-        assert int(seq[last_s + 2]) == int(inds[b, t])
+        assert count == 1, f"induction at t={t} for X={X}: {count} earlier matches"
+        assert int(seq[last_s + 1]) == int(inds[b, t])
 
 
 def test_true_distribution_sums_to_one(dgp: DGP, big_sample):

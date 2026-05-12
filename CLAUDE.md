@@ -472,6 +472,69 @@ Downloaded runs are cached in `PARAM_DECOMP_OUT_DIR/runs/<project>-<run_id>/`.
 - This includes not setting off multiple sweeps/evals that total >8 GPUs
 - Monitor jobs with: `squeue --format="%.18i %.9P %.15j %.12u %.12T %.10M %.9l %.6D %b %R" --me`
 
+## Vast.ai workflow (Phase 1 / Phase 2 operational notes)
+
+This fork doesn't run on a SLURM cluster — it runs on rented vast.ai instances. Time-to-first-step varies from **~30 s to ~10 min** depending on whether the docker image is cached on the chosen host. Read this section before launching anything.
+
+### Image caching dominates cold-start
+
+The host pulls and starts a docker container before your code runs. Three regimes:
+
+| chosen image / template | cold-start time | when this happens |
+| --- | --- | --- |
+| **Cached** template on this host | ~30 s | host already ran this image recently |
+| Uncached **popular** template (e.g. `pytorch/pytorch:latest`) | ~3–6 min | most common case for a fresh offer; image pull + jupyter onstart pip-install |
+| Custom `--image` you've supplied | ~3–10 min, sometimes never | image must be pulled from Docker Hub; ssh server is NOT set up unless you also write a working `--onstart-cmd` (the raw `pytorch/pytorch` image has no sshd) |
+
+**Always use `--template_hash` with a popular template, not `--image`.** The jupyter PyTorch template hash `e5ac96305705404c299c7eb0a2f4f51f` (image: `pytorch/pytorch:latest`) is the most common one and is cached on many hosts. Using a custom `--image` skips the template's onstart, which means **vast.ai's SSH server doesn't get installed/configured** — your `ssh root@…` will time out forever even though `actual_status=running`.
+
+### Pick a host with the image cached when possible
+
+- The `cached_template_hashes` field is not reliably exposed in `vastai search offers --raw` output.
+- The proxy you have for "image likely cached": **same `machine_id` as a previous run**. Hosts retain image caches between rentals; you'll pay the slow first-pull once per (host, image) pair, then it's instant on subsequent rentals.
+- Concretely: when you first rent a host and it pulls the image, **record the `machine_id`**. If you can find an offer with the same `machine_id` later, prefer it.
+- If you can't find a cached host, prefer offers with **`inet_down >= 1000 Mbps`** — fresh-pull time on those is 1–2 min instead of 5+.
+
+### Polling the instance: detect failures, don't only wait for success
+
+`vastai create instance` returns success even when the docker container subsequently fails to start (most common: `Error response from daemon: failed to bind host port for 0.0.0.0:PORT: address already in use`). In that case `actual_status` is stuck at `loading` forever — a naive `until actual_status == running` loop will hang.
+
+Every poll iteration must check three exits:
+
+1. **success**: `actual_status == "running"` → proceed.
+2. **failure**: `status_msg` matches `Error response from daemon|failed to (bind|set up|start)|address already in use|exit code|crashed` → destroy this instance, try the next offer on a different `machine_id`.
+3. **timeout**: hard cap at ~10 min (long enough to tolerate a fresh image pull on a slow host) → log the last `status_msg` and bail.
+
+Reference implementation: `/tmp/wf.py` in the session that authored these notes (Python `subprocess.check_output(['vastai', ...], timeout=30)` with proper exception handling; `wait_for_running_or_fail` returns a tri-state `{running, error, timeout}`).
+
+### Subprocess timeouts are mandatory
+
+`vastai` CLI commands hang occasionally and have crashed mid-call in this project. Wrap every `vastai`/`ssh`/`scp` invocation with an explicit timeout (`subprocess.check_output(..., timeout=30)`) — otherwise a stuck poll wedges your whole script silently.
+
+### `status_msg` interpretation
+
+When the host is in `loading` state, `status_msg` cycles through:
+
+1. `"<image>: Pulling from <repo>"` — fresh pull starting (uncached host).
+2. `"<layer-sha>: Verifying Checksum"` / `"Download complete"` / `"Pull complete"` — layer-by-layer pull progress; the *whole* sequence takes 1–5 min depending on net speed.
+3. `"docker.io/pytorch/pytorch:..."` — image manifest landed.
+4. `"#NN <text>"` — docker BUILD phases (the template's onstart runs as a docker build step). For the popular pytorch jupyter template this includes `apt-get install` of openssh-server and a `pip install` of the entire jupyter graph; this whole phase adds ~2–3 min on top of the pull.
+5. `"Successfully loaded <image>"` — build done, container starting.
+6. `"success, running <image>/ssh"` (or `/jupyter`) — `actual_status` should flip to `running` momentarily; SSH usually answers within another 10–30 s.
+
+If you see a `Pulling from` step within 10 s of `create`, you're on an uncached host. If you must save time, destroy and retry on a different offer — but only if the cheaper-overall option is "pay a few extra cents/hour for a faster-net offer".
+
+### What goes into `phase1.tgz`
+
+For Phase-1 training runs, the bundle is `tar czf /tmp/phase1.tgz -C ~/bilinear-vpd phase1 SPEC.md README.md`. It's only ~70 KB — scp'ing it is a sub-second operation; no need to optimize.
+
+### Local environments
+
+- `~/miniconda3/envs/bilinear-vpd` — Python 3.11. Used for Phase 1 training / tests. Has `torch` (CPU), `einops`, `jaxtyping`, `numpy`, `pytest`, `tqdm`. **Does NOT have `param_decomp`** (the framework needs `typing.override` which arrived in 3.12).
+- `~/miniconda3/envs/vpd` — Python 3.13. Has `param_decomp` editable-installed and `torch 2.8` with CUDA wheels. Used for Phase-2 smoke tests and (when written) the decomposition script.
+
+When committing or pushing, **don't update `git config` globally** — pass `git -c user.email=… -c user.name=…` inline for one-off commits if needed.
+
 ## Coding Guidelines & Software Engineering Principles
 
 **This is research code, not production. Prioritize simplicity and fail-fast over defensive programming.**

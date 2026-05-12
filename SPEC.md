@@ -63,15 +63,17 @@ When the previous token is an `ADJ` `A`, and there is a `LOC` `L` within the las
 - If multiple `LOC`s are within range and multiple `(L, A)` pairs match, prefer the most recent matching `L`.
 - If no matching `(L, A)` pair exists, this primitive does not fire at this position.
 
-**Primitive 3: induction.**
+**Primitive 3: induction (classic `X Y ... X → Y`).**
 
-When the previous two tokens form a pair `(X, Y)` that has occurred earlier in the sequence (i.e., there was an earlier position where `X` was followed by `Y`), the next token is biased toward whatever followed the second occurrence of `X` further in the past.
+If the current token at position `t-1` is `X` and `X` has appeared exactly once earlier in the sequence at some position `s ≤ t-3` (followed by `tokens[s+1] = Y`), the next token is biased toward `Y`. This is the canonical induction-head pattern from the mech-interp literature.
 
-Concretely: if the current position is `t` and the tokens at `t-1` and `t-2` are `Y` and `X` respectively (so the bigram ending at `t-1` is `X-Y`), look for the most recent earlier position `t' < t-1` where the same `X-Y` bigram appears. If such a `t'` exists, the token at `t` is biased toward the token at `t' + 1`.
+> **Earlier draft.** An earlier version of the spec described a bigram-based variant ("if `(tokens[t-2], tokens[t-1])` matched an earlier bigram, predict whatever followed that bigram"). That variant is technically self-consistent but doesn't match the textbook induction circuit that a 2-layer transformer is expected to learn. Switched to classic induction during planning.
 
-> **Distribution choice (resolved during planning).** We use a *smoothed* delta: 0.9 mass on the induced token, 0.1 distributed uniformly over the rest of the vocabulary. This avoids pathological infinite-KL when the model is slightly off, while still strongly indicating the rule.
+Concretely: let `X = tokens[t-1]`. Look for positions `s ∈ [0, t-3]` with `tokens[s] = X`. If exactly one such `s` exists, the induction rule fires with induced token `tokens[s+1]`.
 
-Implementation detail: for clarity, the induction rule fires only if there's a unique earlier occurrence of `X-Y`.
+To keep the firing rate in the target range, **`X` must not be a `FILLER` token** (filler tokens are too common; restricting to content tokens — `SUBJ`/`VERB`/`LOC`/`ADJ`/`CONN` — gives ~10% firing rate).
+
+> **Distribution choice (resolved during planning).** Smoothed delta: 0.9 mass on the induced token, 0.1 distributed uniformly over the rest of the vocabulary. Avoids pathological infinite-KL when the model is slightly off.
 
 ### Sequence generation
 
@@ -81,7 +83,7 @@ Each sequence is built left-to-right:
 2. At each subsequent position, decide which primitive (if any) fires, with this precedence:
     - If the previous token is in `SUBJ`, fire bigram primitive (sample from `SUBJ`-conditional verb distribution).
     - Else if the previous token is in `ADJ` and a matching `LOC` is in range, fire skip-trigram primitive (deterministic next token).
-    - Else if the previous-two tokens match an earlier bigram (uniquely), fire induction primitive (sample from the smoothed induced distribution).
+    - Else if `tokens[t-1]` is a non-filler token that has appeared exactly once earlier in the sequence (at `s ∈ [0, t-3]`), fire induction primitive: sample from smoothed delta on `tokens[s+1]`.
     - Else, sample from a default unigram distribution (mostly fillers, with low probabilities for `SUBJ`/`VERB`/`LOC`/`ADJ` tokens to seed future primitive firings).
 3. End with `<eos>` after some target sequence length (suggested 64–128 tokens).
 
@@ -206,8 +208,5 @@ These are choices made during the planning conversation, recorded here so future
 - **No biases** on Q/K/V/O, MLP arms, or output projection — keeps the architecture cleanly bilinear.
 - **Logging**: plain stdout + jsonl events; no WandB initially.
 - **Codebase**: forked from `goodfire-ai/param-decomp` rather than written fresh, to make Phase 2 (applying VPD) easier.
-- **RMSNorm vs. truly-bilinear normalization.** RMSNorm is non-polynomial in inputs (and indirectly in parameters), which would sink VPD. We therefore prefer a normalization that preserves parameter-polynomial structure. Configurable via `ModelConfig.norm_type ∈ {none, scalar, channel, rmsnorm}`:
-  - `rmsnorm` (v5 baseline): hits all KL targets (induction 0.27) but breaks parameter-polynomial structure.
-  - `none` / `scalar` / `channel` with v5 hyperparams (25k steps, lr=1e-3): induction stalls at KL ≈ 3.1 — phase change does not fire.
-  - `channel` with longer training and/or higher LR: phase change fires (lr=3e-3 at step ~16k; 100k-step run still descending). Best truly-bilinear run is **v12** (`channel`, 100k steps, lr=1e-3): induction KL = 0.361, top-1 = 0.978.
-  - **Phase-2 hand-off:** the `runs/v12_chan_long/` checkpoint is the truly-bilinear target for VPD. Bigram and skip-trigram are essentially perfect (KL ≤ 0.04); induction is slightly above the original 0.3 target but top-1 matches the RMSNorm baseline.
+- **Truly-bilinear normalization (learnable per-channel scale).** The only non-attention/MLP module in the network is a `LearnableChannelScale` (`y = diag(s) · x`, parameter `s ∈ ℝ^{d_model}`) pre-norm before each sublayer plus once before the unembed. This is linear in both inputs and parameters, so the whole network remains parameter-polynomial — the key invariant for VPD analysis. We explored RMSNorm, per-sublayer learnable-scalar, and pure-no-norm variants during a sweep (runs `v6–v13`, `v15`); the channel-scale variant was the only truly-bilinear option that learned induction at all and produces the Phase-2 target checkpoint. **The repo keeps only this single norm strategy; alternatives were removed in the post-classic-induction refactor.**
+- **Phase-2 hand-off:** `runs/v16_chan_lr3e3/model_final.pt` — induction KL = 0.075, top-1 = 0.995. Bigram and skip-trigram are essentially perfect. Trained with `lr=3e-3`, `warmup=1000`, `n_steps=50000`. Classic induction made this checkpoint reach ~50× lower KL than `v12` (bigram rule + same arch).

@@ -177,14 +177,16 @@ class DGP:
         ann = np.zeros(L, dtype=np.int64)
         induced = -np.ones(L, dtype=np.int64)
         tokens[0] = BOS
-        # Bigram history: (X, Y) -> list of follower tokens, accumulated incrementally.
-        bigram_followers: dict[tuple[int, int], list[int]] = {}
+        # Classic induction history: token X -> list of followers Y.
+        # Registered for each position s where the bigram (tokens[s], tokens[s+1])
+        # has fully entered the past at the start of this iteration.
+        token_followers: dict[int, list[int]] = {}
         for t in range(1, L - 1):
-            # Register the bigram starting at s = t - 3 (it becomes "history" only now).
-            # Bigram (tokens[t-3], tokens[t-2]) has follower tokens[t-1].
+            # The most recent s for which tokens[s+1] is strictly before position t-1
+            # is s = t - 3. At iteration t (with t >= 3) we register that mapping.
             if t >= 3:
-                key = (int(tokens[t - 3]), int(tokens[t - 2]))
-                bigram_followers.setdefault(key, []).append(int(tokens[t - 1]))
+                x_past = int(tokens[t - 3])
+                token_followers.setdefault(x_past, []).append(int(tokens[t - 2]))
 
             prev = int(tokens[t - 1])
             if self.vocab.is_subj(prev):
@@ -197,9 +199,8 @@ class DGP:
                     tokens[t] = self.rules.skip_rules[(loc, prev)]
                     ann[t] = ANN_SKIP
                     continue
-            if t >= 2:
-                xy = (int(tokens[t - 2]), prev)
-                followers = bigram_followers.get(xy)
+            if not self.vocab.is_filler(prev):
+                followers = token_followers.get(prev)
                 if followers is not None and len(followers) == 1:
                     induced_tok = followers[0]
                     tokens[t] = self._sample_induced(rng, induced_tok)

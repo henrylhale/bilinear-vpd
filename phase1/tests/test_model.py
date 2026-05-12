@@ -1,12 +1,9 @@
-import pytest
 import torch
 
-from phase1.config import NormType, default_dgp, default_model
+from phase1.config import default_dgp, default_model
 from phase1.model import (
     BilinearTransformer,
     LearnableChannelScale,
-    LearnableScalar,
-    RMSNorm,
     apply_rope,
     make_causal_mask,
     precompute_rope,
@@ -39,13 +36,14 @@ def test_causal_attention():
     assert torch.allclose(logits_a[0, :flip_pos], logits_b[0, :flip_pos], atol=1e-6)
 
 
-def test_no_layernorm():
-    """Sanity: no torch LayerNorm is used (RMSNorm is allowed as fallback per spec)."""
+def test_no_layernorm_or_rmsnorm():
+    """The network must be parameter-polynomial — no per-token RMS or layer norms."""
     import torch.nn as nn
     cfg = default_model(vocab_size=63, seq_len=16)
     model = BilinearTransformer(cfg)
     for m in model.modules():
         assert not isinstance(m, nn.LayerNorm)
+        assert not isinstance(m, nn.RMSNorm)
 
 
 def test_no_biases():
@@ -110,34 +108,25 @@ def test_causal_mask_correctness():
     assert torch.equal(m, expected)
 
 
-@pytest.mark.parametrize("norm_type", ["none", "scalar", "channel", "rmsnorm"])
-def test_all_norm_types_forward_finite(norm_type: NormType):
-    cfg = default_model(vocab_size=63, seq_len=16)
-    cfg.norm_type = norm_type
-    model = BilinearTransformer(cfg)
-    tokens = torch.randint(0, cfg.vocab_size, (2, cfg.seq_len))
-    logits = model(tokens)
-    assert logits.shape == (2, cfg.seq_len, cfg.vocab_size)
-    assert torch.isfinite(logits).all()
+def test_channel_scale_is_linear_in_input():
+    """LearnableChannelScale must be linear in x (key VPD invariant): doubling x
+    must double the output. This is the property that makes the network
+    parameter-polynomial all the way through."""
+    norm = LearnableChannelScale(d_model=8, init=2.0)
+    x = torch.randn(2, 4, 8)
+    assert torch.allclose(norm(2 * x), 2 * norm(x), atol=1e-6)
 
 
-def test_bilinear_norms_have_no_per_token_dependence():
-    """LearnableScalar and LearnableChannelScale must not be functions of x's content
-    (only of x's components linearly), so doubling x must double the output."""
-    for norm in (LearnableScalar(init=1.5), LearnableChannelScale(d_model=8, init=2.0)):
-        x = torch.randn(2, 4, 8)
-        y1 = norm(x)
-        y2 = norm(2 * x)
-        assert torch.allclose(y2, 2 * y1, atol=1e-6)
-
-
-def test_rmsnorm_breaks_input_linearity_intentionally():
-    """Sanity: RMSNorm is the non-bilinear path. Doubling x should NOT double output."""
-    norm = RMSNorm()
-    x = torch.randn(1, 1, 8)
+def test_channel_scale_is_linear_in_parameter():
+    """And linear in the scale parameter too — the (params, input) bilinear property."""
+    d = 8
+    norm = LearnableChannelScale(d_model=d, init=1.0)
+    x = torch.randn(2, 4, d)
     y1 = norm(x)
-    y2 = norm(2 * x)
-    assert not torch.allclose(y2, 2 * y1, atol=1e-3)
+    with torch.no_grad():
+        norm.scale.mul_(3.0)
+    y3 = norm(x)
+    assert torch.allclose(y3, 3 * y1, atol=1e-6)
 
 
 def test_loss_decreases_on_smoke_batch():

@@ -1,0 +1,79 @@
+Sampling 2048 sequences (skip-trigram is rare, need a lot)…
+Forward pass…
+
+Total skip-firing positions: 3613
+Distinct (LOC, ADJ) rule firings observed: 24
+  (LOC_5, ADJ_4) -> CONN_6: 179 firings
+  (LOC_2, ADJ_5) -> CONN_3: 177 firings
+  (LOC_6, ADJ_3) -> CONN_2: 176 firings
+  (LOC_5, ADJ_2) -> CONN_7: 176 firings
+  (LOC_6, ADJ_1) -> CONN_2: 173 firings
+  (LOC_3, ADJ_0) -> CONN_1: 161 firings
+  (LOC_2, ADJ_0) -> CONN_3: 159 firings
+  (LOC_2, ADJ_3) -> CONN_4: 159 firings
+
+=== blocks.0.attn.q1_proj  (C = 32) — top rule-selective components ===
+  comp  dominant rule            mean  others_avg    sel
+    12  L5+A4->C6                0.22       0.019  11.50
+    27  L4+A6->C5                1.00       0.087  11.50
+     9  L4+A6->C5                1.00       0.087  11.50
+    29  L6+A6->C4                0.08       0.007  11.50
+     4  L3+A0->C1                0.62       0.054  11.50
+     0  L6+A1->C2                0.09       0.008  11.50
+    24  L3+A0->C1                0.86       0.075  11.50
+    26  L0+A0->C3                0.62       0.129   4.84
+
+=== blocks.0.attn.k1_proj  (C = 32) — top rule-selective components ===
+  comp  dominant rule            mean  others_avg    sel
+    24  L5+A2->C7                0.46       0.040  11.50
+    22  L1+A4->C1                0.11       0.009  11.50
+    16  L7+A7->C0                0.24       0.021  11.50
+    26  L3+A0->C1                0.08       0.007  11.50
+    12  L3+A0->C1                0.60       0.052  11.50
+    17  L7+A7->C0                0.43       0.038  11.50
+     7  L0+A1->C5                0.46       0.091   5.07
+    15  L5+A4->C6                1.01       0.239   4.20
+
+=== blocks.0.attn.v_proj  (C = 32) — top rule-selective components ===
+  comp  dominant rule            mean  others_avg    sel
+    20  L4+A6->C5                1.01       0.088  11.50
+    15  L0+A1->C5                0.76       0.125   6.07
+    18  L5+A2->C7                1.03       0.221   4.65
+     4  L0+A0->C3                1.01       0.233   4.31
+    28  L0+A1->C5                1.01       0.265   3.81
+    12  L0+A0->C3                1.03       0.354   2.90
+     2  L3+A0->C1                1.00       0.421   2.38
+     6  L7+A7->C0                1.01       0.459   2.19
+
+=== blocks.0.attn.o_proj  (C = 32) — top rule-selective components ===
+  comp  dominant rule            mean  others_avg    sel
+    23  L7+A6->C0                1.01       0.399   2.53
+    22  L0+A1->C5                1.19       0.630   1.89
+    15  L2+A0->C3                1.03       0.607   1.70
+     7  L7+A3->C1                1.16       0.706   1.64
+    31  L7+A6->C0                1.04       0.636   1.63
+    26  L1+A4->C1                1.05       0.669   1.56
+    18  L2+A0->C3                1.09       0.708   1.55
+     5  L6+A4->C5                1.08       0.722   1.50
+
+=== blocks.1.mlp.w_m  (C = 64) — top rule-selective components ===
+  comp  dominant rule            mean  others_avg    sel
+    49  L7+A0->C7                0.54       0.112   4.81
+    59  L2+A3->C4                0.67       0.145   4.65
+    10  L7+A0->C7                0.82       0.181   4.55
+     9  L7+A3->C1                0.77       0.219   3.53
+     3  L6+A4->C5                0.34       0.103   3.29
+    13  L4+A7->C7                0.55       0.169   3.24
+    60  L1+A4->C1                0.54       0.169   3.21
+    58  L2+A3->C4                0.48       0.157   3.08
+
+=== unembed  (C = 64) — top rule-selective components ===
+  comp  dominant rule            mean  others_avg    sel
+    49  L3+A0->C1                0.68       0.276   2.46
+    22  L3+A0->C1                0.51       0.218   2.36
+    47  L2+A3->C4                0.63       0.286   2.19
+     1  L4+A6->C5                0.43       0.208   2.09
+    41  L3+A0->C1                0.35       0.172   2.05
+     9  L6+A7->C4                0.43       0.210   2.04
+    39  L6+A7->C4                0.50       0.248   2.02
+    20  L7+A3->C1                0.45       0.223   2.02

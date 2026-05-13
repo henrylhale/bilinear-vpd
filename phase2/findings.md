@@ -123,9 +123,47 @@ Each non-SUBJ slot has at least one dedicated component (often two). The structu
 
 Layer 1 V (`blocks.1.attn.v_proj`) shows weaker slot-selectivity (max sel ≈ 2), concentrated on ADJ — the value vectors are doing more shared work. Layer 1 MLP and unembed show very weak slot-structure (selectivity ~1.5), confirming they implement *primitive-agnostic* completion machinery.
 
+## Per-rule structure of skip-trigram
+
+`phase2/analyze_skip.py` conditions on the specific `(LOC, ADJ)` pair that triggered each skip firing. Layer 0 attention has *per-rule* dedicated components:
+
+```
+=== blocks.0.attn.k1_proj  C=32  (sel = max/mean-others across rules) ===
+  comp  dominant rule           mean   others_avg   sel
+    24  L5+A2 -> C7             0.46   0.040       11.5   <- single-rule
+    22  L1+A4 -> C1             0.11   0.009       11.5
+    16  L7+A7 -> C0             0.24   0.021       11.5
+    26  L3+A0 -> C1             0.08   0.007       11.5
+    12  L3+A0 -> C1             0.60   0.052       11.5  (same rule as comp 26)
+    17  L7+A7 -> C0             0.43   0.038       11.5  (same rule as comp 16)
+     7  L0+A1 -> C5             0.46   0.091        5.1
+    15  L5+A4 -> C6             1.01   0.239        4.2
+```
+
+The `sel = 11.5` ceiling is an artifact of the metric (mean-of-others denominator gets small for rare rules), not a saturation in the actual data — individual components really do fire on essentially one rule out of 24, with mean importance ≈ 0 elsewhere.
+
+Multiple components often fire on the *same* rule (e.g. comps 26 + 12 both implement `(LOC_3, ADJ_0) → CONN_1`). This is mild redundancy / lack of compression; subset routing during training might pressure these into a single shared component. Worth checking after a subset-routing retrain.
+
+Layer 0 V is similarly rule-selective (sel ≈ 2-6); Layer 0 O is much more shared (sel ≈ 1.5-2.5) — that's the projection that consolidates the rule's effect back into the residual stream, so it doesn't need to be rule-specific.
+
+Layer 1 MLP w_m and unembed both show per-rule structure but at lower selectivity (sel ≈ 2-5) — they're computing "which CONN token to emit" and that's already shared across multiple input rules that emit the same CONN.
+
+## Summary so far
+
+The decomposition has cleanly recovered:
+
+| primitive | mechanism                                                       | components live in              |
+|-----------|------------------------------------------------------------------|---------------------------------|
+| bigram     | 6 per-top-verb classifiers (compressed from 8 SUBJ rules)        | Layer 0 K1/K2/Q1/Q2, ~3 per class |
+| skip-trigram | 24 per-rule detectors                                          | Layer 0 K1, ~1-2 per rule       |
+| induction  | 4 per-slot Layer-1 K detectors (1-2 components per VERB/LOC/ADJ/CONN trigger slot) | Layer 1 K1                    |
+| filler     | shared default machinery                                         | embed, unembed, Layer 1 MLP    |
+
+This matches the architectural intuition: Layer 0 attention identifies the *trigger* of bigram and skip-trigram primitives (which depend only on the immediate previous token + recent context), Layer 1 attention runs the induction matching, and the MLP/unembed do shared completion work.
+
 ## Open questions / what's next
 
-- **Skip-trigram rule mapping.** Repeat the per-SUBJ analysis for skip-trigram positions, conditioning on the `(LOC, ADJ)` pair — should similarly find components-per-rule.
-- **Subset-routing retrain.** The current decomposition was trained with `AllLayersRouter` (mask every layer always). The paper's subset routing should disambiguate components that currently co-fire as a pair.
+- **Subset-routing retrain.** Confirm the per-rule findings are stable when training penalizes co-firing of redundant components (paper's `UniformKSubsetRouter`). Should compress the multi-component-per-skip-rule cases (`L3+A0→C1` had 4-5 dedicated components, probably should collapse to 1).
 - **PPGD.** Adversarial mask sampling would tell us whether the current decomposition's faithfulness is robust to adversarial subset selection or just to the typical training subset.
-- **Geometric verification.** Take the bigram-class-cluster components from Layer 0 K1 (e.g. comp 10 = `{SUBJ_0, SUBJ_3} → VERB_7`) and check that their V column in embed-component space aligns with the SUBJ_0 + SUBJ_3 embedding directions; same for Layer 1 K slot components and the relevant slot's embedding-component projection. This would close the loop from "this component fires when SUBJ_0 is the trigger" to "this component computes inner-product-with-SUBJ_0-embedding".
+- **Geometric verification.** Take the bigram-class-cluster components from Layer 0 K1 (e.g. comp 10 = `{SUBJ_0, SUBJ_3} → VERB_7`) and check that their V column in embed-component space aligns with the SUBJ_0 + SUBJ_3 embedding directions; same for Layer 1 K slot components and the relevant slot's embedding-component projection. This closes the loop from "this component fires when X" to "this component computes inner-product-with-X".
+- **Interaction-node graph.** The actual deliverable from the VPD paper: build a graph where nodes are (component, position) pairs and edges are attribution scores `(∂a_c / ∂a_c')* · a_c' · g_c'`. Useful for visualizing how, e.g., a Layer 0 K1 SUBJ-class component flows downstream to specific Layer 1 MLP w_m components.

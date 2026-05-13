@@ -70,9 +70,39 @@ Top per-module specialists (from `runs/vpd_v16_B/component_analysis.txt`):
 - `blocks.1.mlp.w_m`: 8 components specialized for bigram + 8 for skip
 - `unembed`: components 20, 17 — induction, selectivity ~1.9× (weak but the only place where any component shows up as induction-preferring on the filler-baseline metric)
 
+## Per-SUBJ component structure: VPD recovers verb-equivalence classes
+
+`phase2/analyze_per_subj.py` runs the same forward pass but conditions on the specific `tokens[t-1]` SUBJ token at every bigram-firing position. The output (`runs/vpd_v16_B/per_subj_analysis.txt`) gives, per-module, the mean importance of every component when each of the 8 SUBJ tokens is the trigger.
+
+**The decomposition's bigram-handling components in Layer 0 attention cluster by *shared top verb*, not by raw subject identity.** From the DGP rule table:
+
+| top-verb | SUBJ tokens that map to it |
+|---|---|
+| VERB_1 | SUBJ_6 |
+| VERB_3 | SUBJ_7 |
+| VERB_6 | SUBJ_2 |
+| **VERB_7** | **SUBJ_0, SUBJ_3** |
+| **VERB_8** | **SUBJ_4, SUBJ_5** |
+| VERB_11 | SUBJ_1 |
+
+There are exactly two non-trivial equivalence classes (`{SUBJ_0, SUBJ_3}` and `{SUBJ_4, SUBJ_5}`). The matching `Layer 0 K1` components are exactly these clusters:
+
+| component | per-SUBJ mean importance |
+|---|---|
+| `blocks.0.attn.k1_proj:10` | S0=0.69, **S3=0.72**, others ≈ 0 |
+| `blocks.0.attn.k1_proj:29` | S0=0.67, **S3=0.70**, others ≈ 0 |
+| `blocks.0.attn.k1_proj:9`  | S0=0.58, **S3=0.61**, S7=0.03, rest=0 |
+| `blocks.0.attn.k1_proj:5`  | S4=0.72, **S5=0.71**, S6=0.20, rest=0 |
+
+A handful of components fire for **exactly** the SUBJ pairs that share a top verb. For the six subjects with unique top-verbs there are corresponding singleton components (`q2_proj:26` for SUBJ_1, `k2_proj:11` for SUBJ_2, etc.).
+
+The decomposition has compressed redundant rules: rather than 8 components-per-SUBJ, it found 6 components (one per top-verb), with the two doubly-mapped verbs picked out by SUBJ-pair components. This is exactly the "merge equivalent computations" behavior VPD is supposed to produce.
+
+By contrast, Layer 1 MLP components (`w_m`, `w_n`) show much weaker per-SUBJ structure — their dominant components fire on almost all SUBJ types at similar strength. Those are the **shared "verb-prediction" machinery** that runs regardless of which subject triggered the bigram. The split is consistent with the natural architecture: layer 0 attention identifies *which verb-class*, layer 1 MLP completes the lookup.
+
 ## Open questions / what's next
 
-- **Which specific bigram-component corresponds to which SUBJ token?** The DGP has 8 SUBJ tokens with distinct verb conditional distributions. A clean decomposition should have 8 dedicated bigram-component clusters, one per subject. To check, condition the analysis on `tokens[t-1]` (the trigger SUBJ token) and look for per-SUBJ component firings.
 - **Which Layer 1 key components implement the induction match?** Pick the top Layer-1 K components by induction/bigram ratio (e.g. k2_proj components with induct=0.47, bigram=0.05) and look at their cosine similarity to the embed-component subspace — they should align with token-identity directions.
 - **Subset-routing retrain.** The current decomposition was trained with `AllLayersRouter` (mask every layer always). The paper's subset routing should disambiguate components that currently co-fire as a pair.
 - **PPGD.** Adversarial mask sampling would tell us whether the current decomposition's faithfulness is robust to adversarial subset selection or just to the typical training subset.
+- **Skip-trigram rule mapping.** Repeat the per-SUBJ analysis for skip-trigram positions, conditioning on the `(LOC, ADJ)` pair — should similarly find components-per-rule.

@@ -100,9 +100,32 @@ The decomposition has compressed redundant rules: rather than 8 components-per-S
 
 By contrast, Layer 1 MLP components (`w_m`, `w_n`) show much weaker per-SUBJ structure — their dominant components fire on almost all SUBJ types at similar strength. Those are the **shared "verb-prediction" machinery** that runs regardless of which subject triggered the bigram. The split is consistent with the natural architecture: layer 0 attention identifies *which verb-class*, layer 1 MLP completes the lookup.
 
+## Per-trigger-slot structure of induction
+
+`phase2/analyze_induction.py` buckets induction-firing positions by the slot of the trigger token (`tokens[t-1]`) — VERB / LOC / ADJ / CONN (SUBJ is impossible since bigram primitive takes precedence whenever prev=SUBJ).
+
+**Layer 1 attention keys have dedicated per-slot components:**
+
+```
+=== blocks.1.attn.k1_proj  C=32  (selectivity = max/min across trigger slots) ===
+  comp   VERB    LOC    ADJ   CONN   sel
+     7   0.70   0.11   0.15   0.46   6.54   <- VERB trigger
+    18   0.39   0.80   0.17   0.57   4.62   <- LOC trigger
+     3   0.51   0.16   0.37   0.65   4.06   <- CONN trigger
+     5   0.17   0.42   0.24   0.11   3.83   <- LOC trigger
+     8   0.22   0.16   0.59   0.40   3.63   <- ADJ trigger
+    14   0.27   0.16   0.56   0.37   3.40   <- ADJ trigger
+    28   0.17   0.50   0.31   0.15   3.33   <- LOC trigger
+    26   0.12   0.35   0.37   0.36   3.23   <- ADJ/CONN
+```
+
+Each non-SUBJ slot has at least one dedicated component (often two). The structure is exactly the right one for an induction-head implementation: Layer 1 keys say "I'm a position whose previous token is in slot X" so that Layer 1 queries can match against them. Different slot ⇒ different key direction ⇒ different component.
+
+Layer 1 V (`blocks.1.attn.v_proj`) shows weaker slot-selectivity (max sel ≈ 2), concentrated on ADJ — the value vectors are doing more shared work. Layer 1 MLP and unembed show very weak slot-structure (selectivity ~1.5), confirming they implement *primitive-agnostic* completion machinery.
+
 ## Open questions / what's next
 
-- **Which Layer 1 key components implement the induction match?** Pick the top Layer-1 K components by induction/bigram ratio (e.g. k2_proj components with induct=0.47, bigram=0.05) and look at their cosine similarity to the embed-component subspace — they should align with token-identity directions.
+- **Skip-trigram rule mapping.** Repeat the per-SUBJ analysis for skip-trigram positions, conditioning on the `(LOC, ADJ)` pair — should similarly find components-per-rule.
 - **Subset-routing retrain.** The current decomposition was trained with `AllLayersRouter` (mask every layer always). The paper's subset routing should disambiguate components that currently co-fire as a pair.
 - **PPGD.** Adversarial mask sampling would tell us whether the current decomposition's faithfulness is robust to adversarial subset selection or just to the typical training subset.
-- **Skip-trigram rule mapping.** Repeat the per-SUBJ analysis for skip-trigram positions, conditioning on the `(LOC, ADJ)` pair — should similarly find components-per-rule.
+- **Geometric verification.** Take the bigram-class-cluster components from Layer 0 K1 (e.g. comp 10 = `{SUBJ_0, SUBJ_3} → VERB_7`) and check that their V column in embed-component space aligns with the SUBJ_0 + SUBJ_3 embedding directions; same for Layer 1 K slot components and the relevant slot's embedding-component projection. This would close the loop from "this component fires when SUBJ_0 is the trigger" to "this component computes inner-product-with-SUBJ_0-embedding".
